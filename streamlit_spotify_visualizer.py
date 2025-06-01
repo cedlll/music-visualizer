@@ -1,5 +1,5 @@
 import streamlit as st
-import spotipy
+import spotify
 from spotipy.oauth2 import SpotifyOAuth
 import pandas as pd
 import numpy as np
