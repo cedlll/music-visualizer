@@ -94,7 +94,7 @@ class SpotifyVisualizer:
                         redirect_uri = f"https://{st.get_option('browser.serverAddress')}/callback"
                     else:
                         # Local development
-                        redirect_uri = "http://localhost:8501/callback"
+                        redirect_uri = "https://localhost:8501/callback"
                 
                 auth_manager = SpotifyOAuth(
                     client_id=client_id,
@@ -129,7 +129,7 @@ class SpotifyVisualizer:
                 client_secret = st.secrets["SPOTIFY_CLIENT_SECRET"]
                 
                 # Use the actual Streamlit app URL for redirect
-                app_url = st.secrets.get("STREAMLIT_APP_URL", "https://your-app-name.streamlit.app")
+                app_url = st.secrets.get("STREAMLIT_APP_URL", "https://music-visualizer-xsocefxv5lx6medueidv72.streamlit.app")
                 redirect_uri = f"{app_url}/callback"
                 
                 return self.authenticate(client_id, client_secret, redirect_uri)
