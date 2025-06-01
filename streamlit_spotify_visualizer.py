@@ -1,6 +1,6 @@
 import streamlit as st
 import spotipy
-from spotipy.oauth2 import SpotifyOAuth
+from spotipy.oauth2 import SpotifyOAuth, SpotifyClientCredentials
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -71,24 +71,72 @@ class SpotifyVisualizer:
         self.audio_features = None
         self.audio_analysis = None
         
-    def authenticate(self, client_id, client_secret, redirect_uri):
-        """Authenticate with Spotify API"""
+    def authenticate(self, client_id, client_secret, redirect_uri=None, use_client_credentials=False):
+        """Authenticate with Spotify API - supports both OAuth and Client Credentials"""
         try:
-            scope = "user-read-playback-state user-read-currently-playing playlist-read-private user-library-read"
+            if use_client_credentials:
+                # Use Client Credentials flow (no user auth, limited access)
+                client_credentials_manager = SpotifyClientCredentials(
+                    client_id=client_id,
+                    client_secret=client_secret
+                )
+                self.sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
+                st.info("⚠️ Using Client Credentials mode - some features (playlists, currently playing) won't be available")
+            else:
+                # Use Authorization Code flow with proper redirect URI
+                scope = "user-read-playback-state user-read-currently-playing playlist-read-private user-library-read"
+                
+                # Determine redirect URI based on environment
+                if not redirect_uri:
+                    # Try to detect if running on Streamlit Cloud
+                    if hasattr(st, 'get_option') and 'streamlit.app' in str(st.get_option('server.headless')):
+                        # Running on Streamlit Cloud - use the app URL
+                        redirect_uri = f"https://{st.get_option('browser.serverAddress')}/callback"
+                    else:
+                        # Local development
+                        redirect_uri = "http://localhost:8501/callback"
+                
+                auth_manager = SpotifyOAuth(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    redirect_uri=redirect_uri,
+                    scope=scope,
+                    cache_path=None,
+                    show_dialog=True,
+                    open_browser=False  # Important for Streamlit Cloud
+                )
+                
+                self.sp = spotipy.Spotify(auth_manager=auth_manager)
             
-            auth_manager = SpotifyOAuth(
-                client_id=client_id,
-                client_secret=client_secret,
-                redirect_uri=redirect_uri,
-                scope=scope,
-                cache_path=None,
-                show_dialog=True
-            )
-            
-            self.sp = spotipy.Spotify(auth_manager=auth_manager)
+            # Test the connection
+            self.sp.current_user()
             return True
+            
         except Exception as e:
-            st.error(f"Authentication failed: {str(e)}")
+            error_msg = str(e)
+            if "Address already in use" in error_msg:
+                st.error("Port conflict detected. Trying Client Credentials mode...")
+                return self.authenticate(client_id, client_secret, use_client_credentials=True)
+            else:
+                st.error(f"Authentication failed: {error_msg}")
+                return False
+    
+    def authenticate_with_secrets(self):
+        """Authenticate using Streamlit secrets for cloud deployment"""
+        try:
+            if hasattr(st, 'secrets') and 'SPOTIFY_CLIENT_ID' in st.secrets:
+                client_id = st.secrets["SPOTIFY_CLIENT_ID"]
+                client_secret = st.secrets["SPOTIFY_CLIENT_SECRET"]
+                
+                # Use the actual Streamlit app URL for redirect
+                app_url = st.secrets.get("STREAMLIT_APP_URL", "https://your-app-name.streamlit.app")
+                redirect_uri = f"{app_url}/callback"
+                
+                return self.authenticate(client_id, client_secret, redirect_uri)
+            else:
+                return False
+        except Exception as e:
+            st.error(f"Failed to authenticate with secrets: {str(e)}")
             return False
     
     def get_user_playlists(self):
@@ -125,6 +173,29 @@ class SpotifyVisualizer:
             return tracks
         except Exception as e:
             st.error(f"Failed to fetch playlist tracks: {str(e)}")
+            return []
+    
+    def search_tracks(self, query, limit=20):
+        """Search for tracks - works with Client Credentials"""
+        if not self.sp:
+            return []
+        
+        try:
+            results = self.sp.search(q=query, type='track', limit=limit)
+            tracks = []
+            for track in results['tracks']['items']:
+                if track['preview_url']:  # Only include tracks with preview
+                    tracks.append({
+                        'name': track['name'],
+                        'artist': ', '.join([artist['name'] for artist in track['artists']]),
+                        'id': track['id'],
+                        'preview_url': track['preview_url'],
+                        'popularity': track['popularity'],
+                        'duration_ms': track['duration_ms']
+                    })
+            return tracks
+        except Exception as e:
+            st.error(f"Failed to search tracks: {str(e)}")
             return []
     
     def get_track_features(self, track_id):
@@ -351,6 +422,8 @@ def main():
         st.session_state.visualizer = SpotifyVisualizer()
     if 'authenticated' not in st.session_state:
         st.session_state.authenticated = False
+    if 'auth_mode' not in st.session_state:
+        st.session_state.auth_mode = 'full'  # 'full' or 'limited'
     
     # Header
     st.markdown('<h1 class="main-header">🎵 Spotify Music Visualizer</h1>', unsafe_allow_html=True)
@@ -362,24 +435,52 @@ def main():
         if not st.session_state.authenticated:
             st.info("Connect your Spotify account to start visualizing!")
             
+            # Check if secrets are available
+            if hasattr(st, 'secrets') and 'SPOTIFY_CLIENT_ID' in st.secrets:
+                if st.button("🚀 Use Cloud Credentials"):
+                    if st.session_state.visualizer.authenticate_with_secrets():
+                        st.session_state.authenticated = True
+                        st.session_state.auth_mode = 'full'
+                        st.success("Successfully connected with cloud credentials!")
+                        st.rerun()
+                
+                st.markdown("**OR**")
+            
+            # Manual credential input
+            auth_method = st.radio(
+                "Authentication Method:",
+                ["Full Access (OAuth)", "Limited Access (Client Credentials)"],
+                help="OAuth provides full access but may have port conflicts. Client Credentials provides limited access but is more reliable."
+            )
+            
             client_id = st.text_input("Spotify Client ID", type="password", 
                                     help="Get this from your Spotify Developer Dashboard")
             client_secret = st.text_input("Spotify Client Secret", type="password",
                                         help="Keep this secret and secure")
-            redirect_uri = st.text_input("Redirect URI", value="http://localhost:8888/callback",
-                                       help="Must match your Spotify app settings")
+            
+            if auth_method == "Full Access (OAuth)":
+                redirect_uri = st.text_input("Redirect URI", value="http://localhost:8501/callback",
+                                           help="Must match your Spotify app settings")
+                use_client_credentials = False
+            else:
+                redirect_uri = None
+                use_client_credentials = True
+                st.info("Client Credentials mode: Can search and analyze any track, but cannot access personal playlists or currently playing.")
             
             if st.button("🎵 Connect to Spotify"):
-                if client_id and client_secret and redirect_uri:
-                    if st.session_state.visualizer.authenticate(client_id, client_secret, redirect_uri):
+                if client_id and client_secret:
+                    if st.session_state.visualizer.authenticate(client_id, client_secret, redirect_uri, use_client_credentials):
                         st.session_state.authenticated = True
+                        st.session_state.auth_mode = 'full' if not use_client_credentials else 'limited'
                         st.success("Successfully connected to Spotify!")
                         st.rerun()
                 else:
-                    st.error("Please fill in all authentication fields")
+                    st.error("Please fill in Client ID and Client Secret")
         
         else:
             st.success("✅ Connected to Spotify")
+            if st.session_state.auth_mode == 'limited':
+                st.warning("⚠️ Limited access mode")
             
             if st.button("🔓 Disconnect"):
                 st.session_state.authenticated = False
@@ -388,51 +489,83 @@ def main():
             
             st.markdown("---")
             
-            # Playlist selection
+            # Music selection
             st.header("🎵 Select Music")
             
-            playlists = st.session_state.visualizer.get_user_playlists()
-            if playlists:
-                playlist_names = [name for name, _ in playlists]
-                selected_playlist = st.selectbox("Choose Playlist", playlist_names)
-                
-                if selected_playlist:
-                    playlist_id = next(pid for name, pid in playlists if name == selected_playlist)
-                    tracks = st.session_state.visualizer.get_playlist_tracks(playlist_id)
+            if st.session_state.auth_mode == 'full':
+                # Full access - show playlists and currently playing
+                playlists = st.session_state.visualizer.get_user_playlists()
+                if playlists:
+                    playlist_names = [name for name, _ in playlists]
+                    selected_playlist = st.selectbox("Choose Playlist", playlist_names)
                     
-                    if tracks:
-                        track_names = [f"{track['name']} - {track['artist']}" for track in tracks]
-                        selected_track_name = st.selectbox("Choose Track", track_names)
+                    if selected_playlist:
+                        playlist_id = next(pid for name, pid in playlists if name == selected_playlist)
+                        tracks = st.session_state.visualizer.get_playlist_tracks(playlist_id)
                         
-                        if selected_track_name:
-                            selected_track = next(track for track in tracks 
-                                                if f"{track['name']} - {track['artist']}" == selected_track_name)
+                        if tracks:
+                            track_names = [f"{track['name']} - {track['artist']}" for track in tracks]
+                            selected_track_name = st.selectbox("Choose Track", track_names)
                             
-                            if st.button("🎯 Analyze Track"):
-                                with st.spinner("Analyzing track..."):
-                                    features, analysis = st.session_state.visualizer.get_track_features(selected_track['id'])
-                                    if features:
-                                        st.session_state.current_track = selected_track
-                                        st.session_state.current_features = features
-                                        st.session_state.current_analysis = analysis
-                                        st.success("Track analyzed successfully!")
+                            if selected_track_name:
+                                selected_track = next(track for track in tracks 
+                                                    if f"{track['name']} - {track['artist']}" == selected_track_name)
+                                
+                                if st.button("🎯 Analyze Track"):
+                                    with st.spinner("Analyzing track..."):
+                                        features, analysis = st.session_state.visualizer.get_track_features(selected_track['id'])
+                                        if features:
+                                            st.session_state.current_track = selected_track
+                                            st.session_state.current_features = features
+                                            st.session_state.current_analysis = analysis
+                                            st.success("Track analyzed successfully!")
+                
+                st.markdown("---")
+                
+                # Currently playing
+                st.header("🎵 Now Playing")
+                if st.button("🔄 Get Currently Playing"):
+                    current = st.session_state.visualizer.get_currently_playing()
+                    if current:
+                        st.session_state.current_playing = current
+                        with st.spinner("Analyzing currently playing track..."):
+                            features, analysis = st.session_state.visualizer.get_track_features(current['id'])
+                            if features:
+                                st.session_state.current_track = current
+                                st.session_state.current_features = features
+                                st.session_state.current_analysis = analysis
+                    else:
+                        st.info("No track currently playing")
+                
+                st.markdown("---")
             
-            st.markdown("---")
+            # Search (works in both modes)
+            st.header("🔍 Search Tracks")
+            search_query = st.text_input("Search for a song or artist:")
+            if search_query and st.button("🔍 Search"):
+                with st.spinner("Searching..."):
+                    search_results = st.session_state.visualizer.search_tracks(search_query)
+                    if search_results:
+                        st.session_state.search_results = search_results
+                        st.success(f"Found {len(search_results)} tracks!")
+                    else:
+                        st.info("No tracks found")
             
-            # Currently playing
-            st.header("🎵 Now Playing")
-            if st.button("🔄 Get Currently Playing"):
-                current = st.session_state.visualizer.get_currently_playing()
-                if current:
-                    st.session_state.current_playing = current
-                    with st.spinner("Analyzing currently playing track..."):
-                        features, analysis = st.session_state.visualizer.get_track_features(current['id'])
+            if hasattr(st.session_state, 'search_results') and st.session_state.search_results:
+                track_names = [f"{track['name']} - {track['artist']}" for track in st.session_state.search_results]
+                selected_search_track = st.selectbox("Choose from search results:", track_names)
+                
+                if selected_search_track and st.button("🎯 Analyze Search Result"):
+                    selected_track = next(track for track in st.session_state.search_results 
+                                        if f"{track['name']} - {track['artist']}" == selected_search_track)
+                    
+                    with st.spinner("Analyzing track..."):
+                        features, analysis = st.session_state.visualizer.get_track_features(selected_track['id'])
                         if features:
-                            st.session_state.current_track = current
+                            st.session_state.current_track = selected_track
                             st.session_state.current_features = features
                             st.session_state.current_analysis = analysis
-                else:
-                    st.info("No track currently playing")
+                            st.success("Track analyzed successfully!")
     
     # Main content area
     if st.session_state.authenticated:
@@ -571,23 +704,37 @@ def main():
         st.markdown("""
         ## 🚀 Getting Started
         
+        ### 🔧 Quick Setup (Recommended for Streamlit Cloud)
+        1. **Use Client Credentials Mode** - More reliable for cloud deployment
+        2. **Get Spotify API credentials:**
+           - Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
+           - Create a new app
+           - Note your Client ID and Client Secret
+        3. **Select "Limited Access"** in the sidebar
+        4. **Enter your credentials and connect**
+        
+        ### 🔐 Full Setup (Advanced)
         1. **Create a Spotify App:**
            - Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
            - Create a new app
            - Note your Client ID and Client Secret
            
         2. **Configure Redirect URI:**
-           - In your Spotify app settings, add: `http://localhost:8888/callback`
-           - For Streamlit Cloud deployment, use your app's URL + `/callback`
+           - In your Spotify app settings, add the appropriate redirect URI:
+           - **Local development:** `http://localhost:8501/callback`
+           - **Streamlit Cloud:** `https://your-app-name.streamlit.app/callback`
            
-        3. **Enter Credentials:**
-           - Paste your Client ID and Client Secret in the sidebar
-           - Click "Connect to Spotify"
+        3. **Set up Streamlit Secrets (Optional):**
+           ```toml
+           # .streamlit/secrets.toml
+           SPOTIFY_CLIENT_ID = "your_client_id_here"
+           SPOTIFY_CLIENT_SECRET = "your_client_secret_here"
+           STREAMLIT_APP_URL = "https://your-app-name.streamlit.app"
+           ```
            
-        4. **Start Visualizing:**
-           - Select a playlist and track
-           - Explore different visualization modes
-           - Analyze your music's audio features!
+        ### 🎵 Features Available:
+        - **Client Credentials Mode:** Search any track, full audio analysis
+        - **OAuth Mode:** Personal playlists, currently playing, search
         """)
 
 if __name__ == "__main__":
